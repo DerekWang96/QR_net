@@ -69,7 +69,7 @@ class QR_net():
             self.R_gru_out = tf.concat(outputs, 2)
 
     def add_attentions_n_fusion(self):
-        with tf.variable_scope('Bi-Attention'):
+        with tf.variable_scope('BiAttention'):
             U = tf.get_variable("U", [2 * self.rnn_dim, 2 * self.rnn_dim],
                                 initializer=tf.truncated_normal_initializer(stddev=0.1))
             G = tf.matmul(tf.matmul(self.Q_gru_out, tf.tile(tf.expand_dims(U, 0), [self.batch_size, 1, 1])),
@@ -82,8 +82,8 @@ class QR_net():
         if self.use_self_att:
             with tf.variable_scope("SelfAttention_Q"):
                 k = 32
-                U_q = tf.get_variable("U_q", [2 * self.rnn_dim, k], initializer=tf.truncated_normal_initializer(stddev=0.1))
-                V_q = tf.get_variable("V_q", [k, 1], initializer=tf.truncated_normal_initializer(stddev=0.1))
+                U_q = tf.get_variable("U_r", [2 * self.rnn_dim, k], initializer=tf.truncated_normal_initializer(stddev=0.1))
+                V_q = tf.get_variable("V_r", [k, 1], initializer=tf.truncated_normal_initializer(stddev=0.1))
                 U_q_expand = tf.tile(tf.expand_dims(U_q, 0), [self.batch_size, 1, 1])
                 V_q_expand = tf.tile(tf.expand_dims(V_q, 0), [self.batch_size, 1, 1])
                 UH = tf.tanh(tf.matmul(self.Q_gru_out, U_q_expand))
@@ -123,14 +123,17 @@ class QR_net():
                     + tf.matmul(tf.tile(tf.expand_dims(wR, 0), [self.batch_size, 1, 1]), self.r_R))
 
     def add_output_layer(self):
-        with tf.variable_scope("Classification", reuse=tf.AUTO_REUSE):
-            w = tf.get_variable("w", [2 * self.rnn_dim, 1], initializer=tf.truncated_normal_initializer(stddev=0.1))
-            b = tf.get_variable("b", [self.batch_size, 1], initializer=tf.truncated_normal_initializer(stddev=0.1))
-            u = tf.reshape(self.uQR, [self.batch_size, 2 * self.rnn_dim])
-            wu_b = (tf.matmul(u, w) + b)
-            self.predict = tf.nn.sigmoid(wu_b)
-            self.loss = tf.reduce_sum(
-                tf.nn.sigmoid_cross_entropy_with_logits(labels=self.labels, logits=wu_b, name="binary_classification"))
+        with tf.variable_scope("QR_Task"):
+            with tf.variable_scope("Classification", reuse=tf.AUTO_REUSE):
+                w = tf.get_variable("w", [2 * self.rnn_dim, 1], initializer=tf.truncated_normal_initializer(stddev=0.1))
+                b = tf.get_variable("b", [self.batch_size, 1], initializer=tf.truncated_normal_initializer(stddev=0.1))
+                u = tf.reshape(self.uQR, [self.batch_size, 2 * self.rnn_dim])
+                wu_b = (tf.matmul(u, w) + b)
+                self.predict = tf.nn.sigmoid(wu_b)
+                self.loss = tf.reduce_sum(
+                    tf.nn.sigmoid_cross_entropy_with_logits(labels=self.labels, logits=wu_b,
+                                                            name="binary_classification"))
+
 
     def add_optimizer(self):
         self.optimizer = tf.train.AdamOptimizer().minimize(self.loss)
@@ -142,7 +145,7 @@ class QR_net():
         self.merged = tf.summary.merge_all()
 
     def init_op(self):
-        self.init_op = tf.global_variables_initializer()
+        self.init_op = tf.initialize_all_variables()
 
     def pretrain(self):
         saver = tf.train.Saver()
@@ -158,7 +161,7 @@ class QR_net():
                 # train on QR weak pairs
                 Q_batch, R_batch, Y_batch, last_start = utils.batch_pos_neg(QR_weak_train[0][:self.QR_weak_train_slice], QR_weak_train[1][:self.QR_weak_train_slice],
                                                                             QR_weak_train[2][:self.QR_weak_train_slice], self.batch_size, 0.5,
-                                                                            True, True)
+                                                                            True, False)
                 prediction_weak = []
                 y_weak_true = []
                 for i in range(len(Y_batch)):
@@ -251,39 +254,41 @@ class QR_net():
                     prediction_QR_train += pred
                 precision, recall, f1, d = mertic(prediction_QR_train, y_train_true, self.threshold)
                 print("[Train on QR]: --precision: ", precision, "--recall: ", recall, "--f1: ", f1, "--d:", d)
-                # self.validate(sess, finetune_writer, True, epo)
+
+                precision_num, recall_num, f1_num = 0, 0, 0
+
+                # Validate on QR_dev
+                # for i in range(7):
+                #     QR_dev = utils.generate_train_test(self.QR_dev_dir + str(i) + '.csv', self.word_id, "QR")
+                #
+                #     Q_dev_batch, R_dev_batch, Y_dev_batch, last_start = utils.batch_triplet_shuffle(QR_dev[0],
+                #                                                                                     QR_dev[1],
+                #                                                                                     QR_dev[2],
+                #                                                                                     self.batch_size,
+                #                                                                                     True)
+                #     prediction_dev = []
+                #     y_dev_true = []
+                #     for j in range(len(Y_dev_batch)):
+                #
+                #         Loss_dev, pred = sess.run([self.loss, self.predict],
+                #                                   {self.Q_ori: Q_dev_batch[j], self.R_ori: R_dev_batch[j],
+                #                                    self.labels: Y_dev_batch[j]})
+                #         pred = [pre[0] for pre in pred]
+                #
+                #         if j == len(Y_dev_batch) - 1:
+                #
+                #             prediction_dev += pred
+                #             y_dev_true += [pre[0] for pre in Y_dev_batch[j]]
+                #         else:
+                #             prediction_dev += pred
+                #             y_dev_true += [pre[0] for pre in Y_dev_batch[j]]
+                #     precision, recall, f1, d = mertic(prediction_dev, y_dev_true, self.threshold)
+                #     precision_num += precision
+                #     recall_num += recall
+                #     f1_num += f1
+                # print("[Validate on QR]: --precision: ", precision_num / 7, "--recall: ", recall_num / 7, "--f1: ",
+                #       f1_num / 7, "--d: ", d)
                 self.validate(sess, finetune_writer, False, epo)
-
-            # output the probability
-            # Q_dev_batch, R_dev_batch, Y_dev_batch, (l_s_p, batch_slice) = utils.batch_pos_neg(QR_q_dev,
-            #                                                                                   QR_r_dev,
-            #                                                                                   QR_y_dev,
-            #                                                                                   batch_size,
-            #                                                                                   0.3, True)
-            #
-            # prediction_dev = []
-            # y_dev_true = []
-            # q_dev = []
-            # r_dev = []
-            # for j in range(len(Y_dev_batch)):
-            #     Loss_dev, pred = sess.run([all_loss, predict_QR],
-            #                               {Q_ori: Q_dev_batch[j], R_ori: R_dev_batch[j], labels: Y_dev_batch[j]})
-            #     if j == len(Y_dev_batch) - 1:
-            #         y_dev_true += [pre[0] for pre in Y_dev_batch[j]][l_s_p:]
-            #         prediction_dev += [pre[0] for pre in pred][l_s_p:]
-            #         q_dev += [list(pre) for pre in list(Q_dev_batch)[j]][l_s_p:]
-            #         r_dev += [list(pre) for pre in list(R_dev_batch)[j]][l_s_p:]
-            #     else:
-            #         y_dev_true += [pre[0] for pre in Y_dev_batch[j]]
-            #         prediction_dev += [pre[0] for pre in pred]
-            #         q_dev += [list(pre) for pre in list(Q_dev_batch)[j]]
-            #         r_dev += [list(pre) for pre in list(R_dev_batch)[j]]
-            #
-            #     for q, r, y, pre in zip(q_dev, r_dev, y_dev_true, prediction_dev):
-            #         if y == 1 and pre > 0.5:
-            #             print('FP preds, Q: {}, R: {}, sigmoid output: {}'.format(
-            #                 utils.id_to_words(id_sequence=q, id_word=id_word),utils.id_to_words(id_sequence=r, id_word=id_word),pre))
-
         csv_file.close()
         print('Fintuning detail saved in {0}.'.format(self.timestamp))
 
@@ -329,12 +334,12 @@ class QR_net():
                 writer.writerow(
                     [epo + 1, 'On QR_weak_dev', round(precision_num / times, 6), round(recall_num / times, 6),
                      round(f1_num / times, 6)])
-            print("[Validate on QR_weak dev]: --precision: ", round(precision_num/times,6), "--recall: ", round(recall_num/times,6), "--f1: ", round(f1_num/times,6))
+            print("[Validate on QR_weak dev]: --precision: ", round(precision_num/times,6), "--recall: ", round(recall_num/times,6), "--f1: ", round(f1_num/times,6),'--d:',d)
         else:
             if writer is not None :
                 writer.writerow([epo + 1, 'On QR_dev', round(precision_num / times, 6), round(recall_num / times, 6),
                                  f1_num / times])
-            print("[Validate on QR dev]: --precision: ", round(precision_num/times,6), "--recall: ", round(recall_num/times,6), "--f1: ", round(f1_num/times,6))
+            print("[Validate on QR dev]: --precision: ", round(precision_num/times,6), "--recall: ", round(recall_num/times,6), "--f1: ", round(f1_num/times,6),'--d:',d)
 
 
 

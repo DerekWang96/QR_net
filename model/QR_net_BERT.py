@@ -2,12 +2,12 @@ import tensorflow as tf
 import time, os, csv
 import utils
 from METRIC import mertic
-class QR_net():
+class QR_net_BERT():
     def __init__(self,args,embedding_matrix,word_id_dict,paths):
         self.embedding_matrix = embedding_matrix
         self.batch_size = args.batch_size
         self.max_sequence_length = args.max_sequence_length
-        self.rnn_dim = args.rnn_dim
+        self.BERT_feature_dim = 384  # 768/2
         self.use_BERT = args.use_BERT
         self.use_self_att = args.use_self_att
         self.threshold = args.threshold
@@ -28,10 +28,15 @@ class QR_net():
         self.log_dir = paths['log_dir']
 
 
+    def prepare_features(self):
+        self.pretrain_train_features = utils.generate_features(self.QR_weak_train_path,'QR_weak',self.QR_weak_train_slice)
+        self.pretrain_dev_features = utils.generate_features(self.QR_weak_dev_path,'QR_weak',self.QR_weak_dev_slice)
+        self.finetune_train_features = utils.generate_features(self.QR_train_path,'QR')
+        self.finetune_devs_features = [utils.generate_features(self.QR_dev_dir + str(i) + '.csv', 'QR')  for i in range(7)]
+
     def build_graph(self):
+        self.prepare_features()
         self.add_placeholders()
-        self.add_embeddings()
-        self.add_GRUs()
         self.add_attentions_n_fusion()
         self.add_output_layer()
         self.add_summary()
@@ -43,25 +48,19 @@ class QR_net():
         self.R_ori = tf.placeholder(tf.int32, shape=[self.batch_size, self.max_sequence_length], name="review_ids")
         self.labels = tf.placeholder(tf.float32, shape=[self.batch_size, 1], name="review_ids")
 
-    def add_embeddings(self):
-        with tf.variable_scope("Embedding"):
-            self.W = tf.Variable(tf.to_float(self.embedding_matrix), trainable=False, name="W_Glove")
-            self.Q_embedding = tf.nn.embedding_lookup(self.W, self.Q_ori, name="Q_embedding_lookup")
-            self.R_embedding = tf.nn.embedding_lookup(self.W, self.R_ori, name="R_embedding_lookup")
-
     def add_GRUs(self):
         input_length = tf.fill([self.batch_size], self.max_sequence_length)
         with tf.variable_scope('Q_GRU'):
-            fw_cell = tf.contrib.rnn.GRUCell(self.rnn_dim)
-            bw_cell = tf.contrib.rnn.GRUCell(self.rnn_dim)
+            fw_cell = tf.contrib.rnn.GRUCell(self.BERT_feature_dim)
+            bw_cell = tf.contrib.rnn.GRUCell(self.BERT_feature_dim)
             initial_state_fw = fw_cell.zero_state(self.batch_size, dtype=tf.float32)
             initial_state_bw = bw_cell.zero_state(self.batch_size, dtype=tf.float32)
             (outputs, states) = tf.nn.bidirectional_dynamic_rnn(fw_cell, bw_cell, self.Q_embedding, input_length,
                                                                 initial_state_fw, initial_state_bw)
             self.Q_gru_out = tf.concat(outputs, 2)
         with tf.variable_scope('R_GRU'):
-            fw_cell = tf.contrib.rnn.GRUCell(self.rnn_dim)
-            bw_cell = tf.contrib.rnn.GRUCell(self.rnn_dim)
+            fw_cell = tf.contrib.rnn.GRUCell(self.BERT_feature_dim)
+            bw_cell = tf.contrib.rnn.GRUCell(self.BERT_feature_dim)
             initial_state_fw = fw_cell.zero_state(self.batch_size, dtype=tf.float32)
             initial_state_bw = bw_cell.zero_state(self.batch_size, dtype=tf.float32)
             (outputs, states) = tf.nn.bidirectional_dynamic_rnn(fw_cell, bw_cell, self.R_embedding, input_length,
@@ -70,43 +69,43 @@ class QR_net():
 
     def add_attentions_n_fusion(self):
         with tf.variable_scope('Bi-Attention'):
-            U = tf.get_variable("U", [2 * self.rnn_dim, 2 * self.rnn_dim],
+            U = tf.get_variable("U", [2 * self.BERT_feature_dim, 2 * self.BERT_feature_dim],
                                 initializer=tf.truncated_normal_initializer(stddev=0.1))
-            G = tf.matmul(tf.matmul(self.Q_gru_out, tf.tile(tf.expand_dims(U, 0), [self.batch_size, 1, 1])),
-                          self.R_gru_out, adjoint_b=True)
+            G = tf.matmul(tf.matmul(self.Q_ori, tf.tile(tf.expand_dims(U, 0), [self.batch_size, 1, 1])),
+                          self.R_ori, adjoint_b=True)
             self.Q_att = tf.nn.softmax(tf.reduce_max(G, 2))
             self.R_att = tf.nn.softmax(tf.reduce_max(G, 1))
-            self.r_Q = tf.matmul(tf.transpose(self.Q_gru_out, [0, 2, 1]), tf.expand_dims(self.Q_att, 2))
-            self.r_R = tf.matmul(tf.transpose(self.R_gru_out, [0, 2, 1]), tf.expand_dims(self.R_att, 2))
+            self.r_Q = tf.matmul(tf.transpose(self.Q_ori, [0, 2, 1]), tf.expand_dims(self.Q_att, 2))
+            self.r_R = tf.matmul(tf.transpose(self.R_ori, [0, 2, 1]), tf.expand_dims(self.R_att, 2))
 
         if self.use_self_att:
             with tf.variable_scope("SelfAttention_Q"):
                 k = 32
-                U_q = tf.get_variable("U_q", [2 * self.rnn_dim, k], initializer=tf.truncated_normal_initializer(stddev=0.1))
+                U_q = tf.get_variable("U_q", [2 * self.BERT_feature_dim, k], initializer=tf.truncated_normal_initializer(stddev=0.1))
                 V_q = tf.get_variable("V_q", [k, 1], initializer=tf.truncated_normal_initializer(stddev=0.1))
                 U_q_expand = tf.tile(tf.expand_dims(U_q, 0), [self.batch_size, 1, 1])
                 V_q_expand = tf.tile(tf.expand_dims(V_q, 0), [self.batch_size, 1, 1])
-                UH = tf.tanh(tf.matmul(self.Q_gru_out, U_q_expand))
+                UH = tf.tanh(tf.matmul(self.Q_ori, U_q_expand))
                 self.Q_s_att = tf.nn.softmax(tf.reshape(tf.matmul(UH, V_q_expand), [self.batch_size, self.max_sequence_length]), axis=1)
-                self.r_s_Q = tf.matmul(tf.transpose(self.Q_gru_out, [0, 2, 1]), tf.expand_dims(self.Q_s_att, 2))
+                self.r_s_Q = tf.matmul(tf.transpose(self.Q_ori, [0, 2, 1]), tf.expand_dims(self.Q_s_att, 2))
 
             with tf.variable_scope("SelfAttention_R"):
                 k = 32
-                U_r = tf.get_variable("U_r", [2 * self.rnn_dim, k], initializer=tf.truncated_normal_initializer(stddev=0.1))
+                U_r = tf.get_variable("U_r", [2 * self.BERT_feature_dim, k], initializer=tf.truncated_normal_initializer(stddev=0.1))
                 V_r = tf.get_variable("V_r", [k, 1], initializer=tf.truncated_normal_initializer(stddev=0.1))
                 U_r_expand = tf.tile(tf.expand_dims(U_r, 0), [self.batch_size, 1, 1])
                 V_r_expand = tf.tile(tf.expand_dims(V_r, 0), [self.batch_size, 1, 1])
-                UH = tf.tanh(tf.matmul(self.R_gru_out, U_r_expand))
+                UH = tf.tanh(tf.matmul(self.R_ori, U_r_expand))
                 self.R_s_att = tf.nn.softmax(tf.reshape(tf.matmul(UH, V_r_expand), [self.batch_size, self.max_sequence_length]), axis=1)
-                self.r_s_R = tf.matmul(tf.transpose(self.R_gru_out, [0, 2, 1]), tf.expand_dims(self.R_s_att, 2))
+                self.r_s_R = tf.matmul(tf.transpose(self.R_ori, [0, 2, 1]), tf.expand_dims(self.R_s_att, 2))
             # concat att outputs
             self.r_1 = tf.concat([self.r_Q, self.r_s_Q], 1)
             self.r_2 = tf.concat([self.r_R, self.r_s_R], 1)
             # fusion
             with tf.variable_scope("Concat_Fusion", reuse=tf.AUTO_REUSE):
-                w1 = tf.get_variable("w1", [2 * self.rnn_dim, 4 * self.rnn_dim],
+                w1 = tf.get_variable("w1", [2 * self.BERT_feature_dim, 4 * self.BERT_feature_dim],
                                      initializer=tf.truncated_normal_initializer(stddev=0.1))
-                w2 = tf.get_variable("w2", [2 * self.rnn_dim, 4 * self.rnn_dim],
+                w2 = tf.get_variable("w2", [2 * self.BERT_feature_dim, 4 * self.BERT_feature_dim],
                                      initializer=tf.truncated_normal_initializer(stddev=0.1))
                 self.uQR = tf.nn.tanh(
                     tf.matmul(tf.tile(tf.expand_dims(w1, 0), [self.batch_size, 1, 1]), self.r_1)
@@ -114,9 +113,9 @@ class QR_net():
 
         else:
             with tf.variable_scope("Fusion", reuse=tf.AUTO_REUSE):
-                wQ = tf.get_variable("w1", [2 * self.rnn_dim, 2 * self.rnn_dim],
+                wQ = tf.get_variable("w1", [2 * self.BERT_feature_dim, 2 * self.BERT_feature_dim],
                                      initializer=tf.truncated_normal_initializer(stddev=0.1))
-                wR = tf.get_variable("w2", [2 * self.rnn_dim, 2 * self.rnn_dim],
+                wR = tf.get_variable("w2", [2 * self.BERT_feature_dim, 2 * self.BERT_feature_dim],
                                      initializer=tf.truncated_normal_initializer(stddev=0.1))
                 self.uQR = tf.nn.tanh(
                     tf.matmul(tf.tile(tf.expand_dims(wQ, 0), [self.batch_size, 1, 1]), self.r_Q)
@@ -124,9 +123,9 @@ class QR_net():
 
     def add_output_layer(self):
         with tf.variable_scope("Classification", reuse=tf.AUTO_REUSE):
-            w = tf.get_variable("w", [2 * self.rnn_dim, 1], initializer=tf.truncated_normal_initializer(stddev=0.1))
+            w = tf.get_variable("w", [2 * self.BERT_feature_dim, 1], initializer=tf.truncated_normal_initializer(stddev=0.1))
             b = tf.get_variable("b", [self.batch_size, 1], initializer=tf.truncated_normal_initializer(stddev=0.1))
-            u = tf.reshape(self.uQR, [self.batch_size, 2 * self.rnn_dim])
+            u = tf.reshape(self.uQR, [self.batch_size, 2 * self.BERT_feature_dim])
             wu_b = (tf.matmul(u, w) + b)
             self.predict = tf.nn.sigmoid(wu_b)
             self.loss = tf.reduce_sum(
@@ -298,9 +297,9 @@ class QR_net():
         precision_num, recall_num, f1_num = 0, 0, 0
         for i in range(times):
             if on_QR_weak:
-                QR_dev = utils.generate_train_test(self.QR_weak_dev_path, self.word_id, "QA")
+                QR_dev = self.pretrain_dev_features
             else:
-                QR_dev = utils.generate_train_test(self.QR_dev_dir + str(i) + '.csv', self.word_id, "QR")
+                QR_dev = self.finetune_devs_features[i]
 
             Q_dev_batch, R_dev_batch, Y_dev_batch, last_start = utils.batch_triplet_shuffle(
                 QR_dev[0], QR_dev[1],
