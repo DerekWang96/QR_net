@@ -2,15 +2,17 @@ import time, os, csv
 import tensorflow as tf
 import utils
 import pickle,argparse
-from model.QR_net_base import  QR_net
+from model.QR_net_base import QR_net
+from model.QR_net_BERT import QR_net_BERT
 os.environ["CUDA_VISIBLE_DEVICES"] = '-1'
+# add configs
 parser = argparse.ArgumentParser()
 parser.add_argument('--QR_weak_train_path',type=str, default="data/QR_weak/QR_weak_cell.csv")
 parser.add_argument('--QR_weak_dev_path',type=str, default="data/QR_weak/QR_weak_dev.csv")
 parser.add_argument('--QR_train_path',type=str, default="data/QR/QR_train.csv")
 parser.add_argument('--QR_dev_path',type=str, default="data/QR/QR_dev_large.csv")
 parser.add_argument('--QR_dev_dir',type=str, default="data/QR/dev_2/")
-parser.add_argument('--restore_model',type=str, default='1554778842')
+parser.add_argument('--restore_model',type=str, default='1551767099')
 parser.add_argument('--use_BERT',type=bool, default=False)
 parser.add_argument('--max_sequence_length',type=int, default=80)
 parser.add_argument('--rnn_dim',type=int, default=32)
@@ -18,12 +20,12 @@ parser.add_argument('--batch_size',type=int, default=128)
 parser.add_argument('--use_self_att',type=bool, default=True)
 parser.add_argument('--threshold',type=float, default=0.5)
 parser.add_argument('--finetune_flag',type=bool, default=True)
-parser.add_argument('--preTraining_epochs',type=int, default=1)
-parser.add_argument('--fineTune_epochs',type=int, default=5)
-parser.add_argument('--QR_weak_train_slice',type=int, default=20000)
+parser.add_argument('--preTraining_epochs',type=int, default=2)
+parser.add_argument('--fineTune_epochs',type=int, default=55)
+parser.add_argument('--QR_weak_train_slice',type=int, default=60000)
 parser.add_argument('--QR_weak_dev_slice',type=int, default=5000)
 parser.add_argument('--QR_train_slice',type=int, default=-1)
-parser.add_argument('--mode',type=str, default='finetune',help='pretrain, finetune')
+parser.add_argument('--mode',type=str, default='pretrain',help='pretrain, finetune')
 args = parser.parse_args()
 
 paths = {}
@@ -59,15 +61,22 @@ embedding_index, word_id, id_word = utils.read_word_embedding(embedding_path, wo
 embedding_matrix = utils.pretrained_embedding_matrix(word_id, embedding_index, word_embedding_dim)
 vocab_size = len(word_id) + 1
 
-if args.mode == 'pretrain':
-    model = QR_net(args,embedding_matrix,word_id,paths)
-    model.build_graph()
-    model.pretrain()
+if args.use_BERT == False:
+    if args.mode == 'pretrain':
+        model = QR_net(args, embedding_matrix, word_id, paths)
+        model.build_graph()
+        model.pretrain()
 
-elif args.mode == 'finetune':
-    model = QR_net(args,embedding_matrix,word_id,paths)
-    model.build_graph()
-    model.finetune()
+    elif args.mode == 'finetune':
+        model = QR_net(args, embedding_matrix, word_id, paths)
+        model.build_graph()
+        model.finetune()
+else:
+    if args.mode == 'pretrain':
+        model = QR_net_BERT(args, embedding_matrix, word_id, paths)
+        model.build_graph()
+        model.pretrain()
+
 
 
 

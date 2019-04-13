@@ -5,6 +5,8 @@ from keras.preprocessing.sequence import pad_sequences
 import tensorflow as tf
 import random
 import os
+from bert_serving.client import BertClient
+
 
 # Stanford Glove
 embedding_path = "glove.6B.50d.txt"
@@ -138,6 +140,39 @@ def generate_train_test(QR_QA_path, word_id, read_pattern):
     r_a = pad_sequences(review_answer, maxlen=MAX_SEQUENCE_LENGTH, padding="post")
     y = np.asarray(label)
     return q, r_a, y
+
+
+def generate_features(QR_QA_path, read_pattern):
+    data_csv = csv.reader(open(QR_QA_path, "r"))
+    # bc = BertClient(ip='222.25.172.41')
+    bc = BertClient(check_length=False)
+    print('fatch features for ', QR_QA_path) # add some outs for low speed.
+    QR_words = []
+    questions = []
+    reviews = []
+    labels = []
+    for item in data_csv:
+        if len(item) >= 3:
+            question = item[1].strip()
+            review = item[2].strip()
+            if read_pattern == "QR":
+                if item[4].strip() != '':
+                    label = int(item[4].strip())
+                else:
+                    label = 0
+            else:
+                if item[3].strip() != '':
+                    label = int(item[3].strip())
+                else:
+                    label = 0
+            QR_words.append((question, review, label))
+            questions.append(question)
+            reviews.append(review)
+            labels.append(label)
+    questions = bc.encode(questions)
+    reviews = bc.encode(reviews)
+    y = np.asarray(labels)
+    return questions, reviews, y
 
 
 def batch_triplet_shuffle(Q, RA, Y, batch_size, shuff=False):
@@ -348,3 +383,7 @@ def batch_triplet_shuffle_with_sents(Q_id, RA_id, Y, Q, R, batch_size, shuff=Fal
                 R_batch.append(R[i: i + batch_size])
 
     return Q_id_batch, RA_id_batch, Y_batch, Q_batch, R_batch, last_start
+
+if __name__ == '__main__':
+    QR = generate_features('data/QR/QR_train.csv','QR')
+    print(QR)
